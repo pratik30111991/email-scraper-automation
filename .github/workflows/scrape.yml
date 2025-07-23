@@ -3,7 +3,7 @@ name: Run Ahrefs Scraper
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'  # Runs every hour
+    - cron: '0 * * * *'
 
 jobs:
   scrape:
@@ -23,11 +23,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Write credentials.json
-        shell: bash
-        run: |
-          printf "%s" "$GOOGLE_JSON" > credentials.json
-        env:
-          GOOGLE_JSON: ${{ secrets.GOOGLE_JSON }}
+        run: echo "${{ secrets.GOOGLE_JSON }}" > credentials.json
 
       - name: Run scraper
         run: python ahrefs_scraper.py
