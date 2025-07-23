@@ -1,15 +1,15 @@
-name: Scrape Emails and Phones
+name: Run Email Scraper
 
 on:
-  schedule:
-    - cron: '0 * * * *'  # Runs every hour
   workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *' # Runs every hour
 
 jobs:
-  scrape:
+  run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -21,10 +21,9 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Add Google Credentials
-        run: echo "$GOOGLE_JSON" > credentials.json
+      - name: Run scraper
         env:
           GOOGLE_JSON: ${{ secrets.GOOGLE_JSON }}
-
-      - name: Run scraper
-        run: python main.py
+        run: |
+          echo "$GOOGLE_JSON" > credentials.json
+          python ahrefs_scraper.py
