@@ -1,82 +1,73 @@
-import os
-import json
-import base64
-import smtplib
-import imaplib
-import email.utils
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from datetime import datetime
-from pytz import timezone
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import requests
+from bs4 import BeautifulSoup
+import re
+import time
 
-# === SETTINGS ===
-TIMEZONE = 'Asia/Kolkata'
-SHEET_ID = os.getenv('SHEET_ID')
-TRACKING_BACKEND = "https://auto-email-scheduler.onrender.com"
+# === AUTH SETUP ===
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+client = gspread.authorize(creds)
 
-# === AUTHENTICATE GOOGLE SHEETS ===
-creds_json = json.loads(os.getenv('GOOGLE_JSON'))
-scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
-client = gspread.authorize(credentials)
+# === CONFIG ===
+SHEET_ID = "1S29IoI97zph9oouwlsA7siFA4cymh-dB6cX0S5yjKtQ"
+SHEET_NAME = "Sheet1"
+MAX_LINKS_PER_RUN = 25
 
-# === LOAD SHEET ===
-sheet = client.open_by_key(SHEET_ID)
-worksheet = sheet.worksheet("Sales_Mails")
+# === FETCH SHEET ===
+sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+headers = sheet.row_values(1)
+rows = sheet.get_all_values()[1:]
 
-# === READ ALL ROWS ===
-rows = worksheet.get_all_records()
-now = datetime.now(timezone(TIMEZONE))
+# === FIND EMAIL/CELL COL INDEXES ===
+link_col_idx = headers.index("Referring page URL") + 1
+group_col_idx = headers.index("Links in group") + 1
+email_col_idx = group_col_idx + 2  # Leave one blank column
+phone_col_idx = group_col_idx + 3
 
-for idx, row in enumerate(rows, start=2):  # start=2 because of header row
+# === EMAIL & PHONE EXTRACTORS ===
+def extract_email(text):
+    emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
+    return emails[0] if emails else "Not Found"
+
+def extract_phone(text):
+    phones = re.findall(r"\+?\d[\d\s\-()]{7,}\d", text)
+    return phones[0] if phones else "Not Found"
+
+# === SCRAPE FUNCTION ===
+def scrape_info(url):
     try:
-        email_id = row.get('Email ID', '').strip()
-        name = row.get('Name', '').strip()
-        subject = row.get('Subject', '').strip()
-        message = row.get('Message', '').strip()
-        schedule_str = row.get('Schedule Date & Time', '').strip()
-        status = row.get('Status', '').strip()
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, timeout=10, headers=headers)
+        soup = BeautifulSoup(response.text, "html.parser")
+        text = soup.get_text()
+        email = extract_email(text)
+        phone = extract_phone(text)
+        return email, phone
+    except Exception:
+        return "Error", "Error"
 
-        if not email_id or not name or not schedule_str or status:
-            continue
+# === PROCESS ROWS ===
+processed = 0
+for i, row in enumerate(rows, start=2):  # start=2 because row 1 is header
+    if processed >= MAX_LINKS_PER_RUN:
+        break
 
-        try:
-            schedule_time = datetime.strptime(schedule_str, "%d/%m/%Y %H:%M:%S").astimezone(timezone(TIMEZONE))
-        except ValueError:
-            worksheet.update_acell(f'H{idx}', "Skipped: Invalid Date Format")
-            continue
+    url = row[link_col_idx - 1].strip()
+    email_cell = sheet.cell(i, email_col_idx).value
+    phone_cell = sheet.cell(i, phone_col_idx).value
 
-        if now < schedule_time:
-            continue
+    if email_cell or phone_cell:
+        continue  # Skip already processed
 
-        # Add tracking pixel
-        tracking_url = f"{TRACKING_BACKEND}/track?sheet=Sales_Mails&row={idx}&email={email_id}"
-        full_message = f'{message}<br><img src="{tracking_url}" width="1" height="1">'
+    if not url or not url.startswith("http"):
+        continue
 
-        # Send Email
-        from_email = os.getenv("SMTP_EMAIL")
-        smtp_pass = os.getenv("SMTP_PASSWORD")
-        smtp_host = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    print(f"Processing row {i}: {url}")
+    email, phone = scrape_info(url)
+    sheet.update_cell(i, email_col_idx, email)
+    sheet.update_cell(i, phone_col_idx, phone)
 
-        msg = MIMEMultipart()
-        msg['To'] = email_id
-        msg['From'] = f"Unlisted Radar <{from_email}>"
-        msg['Subject'] = subject
-        msg['Date'] = email.utils.format_datetime(now)
-        msg.attach(MIMEText(full_message, 'html'))
-
-        server = smtplib.SMTP(smtp_host, smtp_port)
-        server.starttls()
-        server.login(from_email, smtp_pass)
-        server.sendmail(from_email, email_id, msg.as_string())
-        server.quit()
-
-        # Mark status
-        worksheet.update(f'H{idx}', 'Sent')
-        worksheet.update(f'I{idx}', now.strftime('%d/%m/%Y %H:%M:%S'))
-
-    except Exception as e:
-        worksheet.update(f'H{idx}', f'Failed: {str(e)}')
+    processed += 1
+    time.sleep(2)  # Be polite
