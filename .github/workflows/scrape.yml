@@ -2,14 +2,14 @@ name: Scrape Emails and Phones
 
 on:
   schedule:
-    - cron: '0 * * * *'  # every hour
+    - cron: '0 * * * *'  # Runs every hour
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -21,7 +21,7 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Add credentials
+      - name: Add Google Credentials
         run: echo "$GOOGLE_JSON" > credentials.json
         env:
           GOOGLE_JSON: ${{ secrets.GOOGLE_JSON }}
