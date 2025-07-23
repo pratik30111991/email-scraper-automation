@@ -1,78 +1,63 @@
-import time
-import random
 import re
+import time
 import requests
 import gspread
 from bs4 import BeautifulSoup
+from random import randint
 from oauth2client.service_account import ServiceAccountCredentials
 
-# --- Google Sheet Setup ---
-SHEET_NAME = 'Sheet1'
-LINK_COLUMN_HEADER = 'Links in group'
-EMAIL_COLUMN = 'Email ID'
-PHONE_COLUMN = 'Contact Number'
-STATUS_COLUMN = 'Status'
-
-# --- Authorize Google Sheets ---
-scope = ['https://spreadsheets.google.com/feeds',
-         'https://www.googleapis.com/auth/drive']
-creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+# Google Sheets auth
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
-sheet = client.open_by_url('https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID_HERE')
-worksheet = sheet.worksheet(SHEET_NAME)
 
-# --- Helper functions ---
-def extract_emails(text):
-    return list(set(re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)))
+# Sheet config
+sheet = client.open_by_key("1S29IoI97zph9oouwlsA7siFA4cymh-dB6cX0S5yjKtQ")
+worksheet = sheet.worksheet("Sheet1")
 
-def extract_phones(text):
-    return list(set(re.findall(r"(?:\+\d{1,3}\s?)?(?:\(\d{2,5}\)|\d{2,5})[\s.-]?\d{3,5}[\s.-]?\d{3,5}", text)))
+# Column positions
+URL_COL = worksheet.row_values(1).index("Links in group") + 1
+EMAIL_COL = URL_COL + 2
+PHONE_COL = URL_COL + 3
+STATUS_COL = URL_COL + 4
 
-def fetch_page_content(url):
+# Get all rows
+all_rows = worksheet.get_all_values()
+
+# Process each row
+for i, row in enumerate(all_rows[1:], start=2):  # Skip header row
     try:
+        url = row[URL_COL - 1]
+        status = row[STATUS_COL - 1] if len(row) >= STATUS_COL else ""
+
+        if not url.strip() or status in ["Done", "Failed", "Skipped"]:
+            continue
+
+        print(f"Scraping row {i}: {url}")
+        time.sleep(randint(5, 8))
+
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36'
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/102.0.0.0 Safari/537.36"
         }
-        resp = requests.get(url, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            return resp.text
-        return None
-    except:
-        return None
+        r = requests.get(url, headers=headers, timeout=20)
 
-# --- Main Logic ---
-rows = worksheet.get_all_records()
-header = worksheet.row_values(1)
+        if not r.ok:
+            worksheet.update_cell(i, STATUS_COL, "Failed")
+            continue
 
-link_index = header.index(LINK_COLUMN_HEADER)
-email_index = header.index(EMAIL_COLUMN)
-phone_index = header.index(PHONE_COLUMN)
-status_index = header.index(STATUS_COLUMN)
+        soup = BeautifulSoup(r.text, "html.parser")
+        text = soup.get_text()
 
-for i, row in enumerate(rows, start=2):  # Row 2 onwards
-    url = row.get(LINK_COLUMN_HEADER)
-    status = row.get(STATUS_COLUMN)
+        emails = set(re.findall(r"[\w\.-]+@[\w\.-]+", text))
+        phones = set(re.findall(r"(?:\+\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3}[-.\s]?\d{4,6}", text))
 
-    if not url:
-        worksheet.update_cell(i, status_index + 1, 'Skipped: No URL')
-        continue
-    if status in ['Done', 'Failed', 'Skipped: No URL']:
-        continue
+        email_val = ", ".join(emails) if emails else "Not Found"
+        phone_val = ", ".join(phones) if phones else "Not Found"
 
-    html = fetch_page_content(url)
-    if not html:
-        worksheet.update_cell(i, status_index + 1, 'Failed')
-        continue
+        worksheet.update_cell(i, EMAIL_COL, email_val)
+        worksheet.update_cell(i, PHONE_COL, phone_val)
+        worksheet.update_cell(i, STATUS_COL, "Done")
 
-    soup = BeautifulSoup(html, 'html.parser')
-    emails = extract_emails(html)
-    phones = extract_phones(html)
-
-    email = emails[0] if emails else ''
-    phone = phones[0] if phones else ''
-
-    worksheet.update_cell(i, email_index + 1, email)
-    worksheet.update_cell(i, phone_index + 1, phone)
-    worksheet.update_cell(i, status_index + 1, 'Done' if email or phone else 'No data')
-
-    time.sleep(random.uniform(5, 8))
+    except Exception as e:
+        print(f"Row {i} error: {e}")
+        worksheet.update_cell(i, STATUS_COL, "Failed")
