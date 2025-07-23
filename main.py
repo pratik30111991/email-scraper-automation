@@ -1,93 +1,85 @@
-import re
-import time
 import gspread
+import re
 import requests
 from bs4 import BeautifulSoup
 from oauth2client.service_account import ServiceAccountCredentials
+from time import sleep
 
-# === SETTINGS ===
-GOOGLE_SHEET_NAME = "YOUR_SHEET_NAME"
-WORKSHEET_NAME = "Sheet1"
-SERVICE_ACCOUNT_FILE = "credentials.json"
-MAX_LINKS_PER_RUN = 1000  # Or set as needed
-WAIT_SECONDS_BETWEEN_REQUESTS = 2  # Avoid blocking
+# -------------- CONFIGURATION --------------
+SPREADSHEET_NAME = "Your Google Sheet Name Here"
+WORKSHEET_NAME = "Sheet1"  # or change to match your sheet
+LINKS_COLUMN_HEADER = "Links in group"
+EMAIL_COLUMN_HEADER = "Email ID"
+PHONE_COLUMN_HEADER = "Contact Number"
+STATUS_COLUMN_HEADER = "Status"
+MAX_PER_RUN = 50  # Change this if you want more per run
+SLEEP_BETWEEN = 5  # seconds delay between scraping each row
+# ------------------------------------------
 
-# === Setup Google Sheet ===
+# Google Sheets API Auth
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
+creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
-sheet = client.open(GOOGLE_SHEET_NAME).worksheet(WORKSHEET_NAME)
+sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+data = sheet.get_all_records()
 
-# === Load all data ===
-data = sheet.get_all_values()
-headers = data[0]
-rows = data[1:]
+# Get column indexes
+headers = sheet.row_values(1)
+link_idx = headers.index(LINKS_COLUMN_HEADER)
+email_idx = link_idx + 2
+phone_idx = link_idx + 3
+status_idx = headers.index(STATUS_COLUMN_HEADER)
 
-# === Column Indexes ===
-try:
-    url_col = headers.index("Referring page URL")
-    status_col = headers.index("Status")
-except ValueError:
-    headers.append("Status")
-    status_col = len(headers) - 1
-    sheet.update_cell(1, status_col + 1, "Status")
+# Ensure headers exist
+if len(headers) <= phone_idx:
+    sheet.update_cell(1, email_idx + 1, EMAIL_COLUMN_HEADER)
+    sheet.update_cell(1, phone_idx + 1, PHONE_COLUMN_HEADER)
 
-if "Email ID" not in headers:
-    headers.append("Email ID")
-    sheet.update_cell(1, len(headers), "Email ID")
-email_col = headers.index("Email ID")
+done_count = 0
 
-if "Contact Number" not in headers:
-    headers.append("Contact Number")
-    sheet.update_cell(1, len(headers), "Contact Number")
-phone_col = headers.index("Contact Number")
-
-# === Helper Functions ===
-def extract_emails(text):
-    return list(set(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)))
-
-def extract_phones(text):
-    return list(set(re.findall(r"\+?\d[\d\s\-()]{8,}", text)))
-
-# === Main Loop ===
-processed = 0
-for i, row in enumerate(rows):
-    sheet_row_num = i + 2
-    status = row[status_col] if status_col < len(row) else ""
-
-    if status.strip().lower() == "done":
+# Start processing
+for row_num, row in enumerate(data, start=2):
+    if row.get(STATUS_COLUMN_HEADER, "").strip().lower() == "done":
+        continue
+    if not row.get(LINKS_COLUMN_HEADER):
         continue
 
-    url = row[url_col] if url_col < len(row) else ""
-    if not url.strip():
-        continue
-
-    print(f"🔍 Visiting: {url}")
+    url = row[LINKS_COLUMN_HEADER]
+    print(f"Processing row {row_num}: {url}")
+    
     try:
-        response = requests.get(url, timeout=10, headers={
-            "User-Agent": "Mozilla/5.0"
-        })
-        soup = BeautifulSoup(response.text, "html.parser")
-        text = soup.get_text()
+        # Fetch the page
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+        r = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+        text = soup.get_text(" ", strip=True)
 
-        emails = extract_emails(text)
-        phones = extract_phones(text)
+        # Extract email
+        emails = list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)))
+        email = emails[0] if emails else ""
 
-        email_str = ", ".join(emails)[:300]
-        phone_str = ", ".join(phones)[:300]
+        # Extract phone number
+        phones = list(set(re.findall(r"\+?\d[\d\s\-\(\)]{8,}\d", text)))
+        phone = phones[0] if phones else ""
 
-        # Update the row
-        sheet.update_cell(sheet_row_num, email_col + 1, email_str)
-        sheet.update_cell(sheet_row_num, phone_col + 1, phone_str)
-        sheet.update_cell(sheet_row_num, status_col + 1, "Done")
+        # Update sheet
+        if email:
+            sheet.update_cell(row_num, email_idx + 1, email)
+        if phone:
+            sheet.update_cell(row_num, phone_idx + 1, phone)
+        sheet.update_cell(row_num, status_idx + 1, "Done")
+        print(f"✅ Done: {email} | {phone}")
 
     except Exception as e:
-        print(f"❌ Error on row {sheet_row_num}: {e}")
-        sheet.update_cell(sheet_row_num, status_col + 1, "Failed")
-
-    processed += 1
-    if processed >= MAX_LINKS_PER_RUN:
+        print(f"❌ Error on row {row_num}: {str(e)}")
+        sheet.update_cell(row_num, status_idx + 1, "Error")
+    
+    done_count += 1
+    if done_count >= MAX_PER_RUN:
+        print("✅ Max limit reached for this run.")
         break
-    time.sleep(WAIT_SECONDS_BETWEEN_REQUESTS)
+    sleep(SLEEP_BETWEEN)
 
-print("✅ Done.")
+print("✅ All done.")
