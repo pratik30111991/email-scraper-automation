@@ -1,68 +1,70 @@
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import requests
-from bs4 import BeautifulSoup
 import re
 import time
-import phonenumbers
+import requests
+from bs4 import BeautifulSoup
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from urllib.parse import urlparse
 
-# === Google Sheet Setup ===
-SHEET_ID = "1S29IoI97zph9oouwlsA7siFA4cymh-dB6cX0S5yjKtQ"
-SHEET_NAME = "Sheet1"
-REFERRING_URL_COL = 3  # C = 3
-LINKS_IN_GROUP_COL = 33  # AG = 33
-EMAIL_COL = 35  # AI
-PHONE_COL = 36  # AJ
-STATUS_COL = 37  # AK
-
-# === Authenticate with Google Sheets ===
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-credentials = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+# Google Sheets setup
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+credentials = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
 gc = gspread.authorize(credentials)
-worksheet = gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
-# === Get all data ===
-data = worksheet.get_all_values()
+sheet_url = 'https://docs.google.com/spreadsheets/d/1S29IoI97zph9oouwlsA7siFA4cymh-dB6cX0S5yjKtQ/edit'
+doc = gc.open_by_url(sheet_url)
+sheet = doc.worksheet('Sheet1')
 
-# === Email/Phone Regex ===
-EMAIL_REGEX = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-HEADERS = {'User-Agent': 'Mozilla/5.0'}
+# Column definitions
+URL_COL = 3      # Referring page URL
+STATUS_COL = 39  # AM = Status
+EMAIL_COL = 37   # AK
+PHONE_COL = 38   # AL
 
-def extract_emails_and_phones(html):
-    emails = re.findall(EMAIL_REGEX, html)
-    phones = []
-    for match in phonenumbers.PhoneNumberMatcher(html, "IN"):
-        phones.append(phonenumbers.format_number(match.number, phonenumbers.PhoneNumberFormat.INTERNATIONAL))
-    return list(set(emails)), list(set(phones))
+def extract_contacts(html):
+    emails = list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", html)))
+    phones = list(set(re.findall(r"\+?\d[\d\s\-().]{7,}\d", html)))
+    return emails, phones
 
-# === Loop through rows ===
-for i, row in enumerate(data[1:], start=2):  # Start from row 2
-    try:
-        referring_url = row[REFERRING_URL_COL - 1]
-        if not referring_url or "http" not in referring_url:
+def is_valid_domain(url):
+    parsed = urlparse(url)
+    return parsed.scheme in ['http', 'https']
+
+def main():
+    rows = sheet.get_all_values()
+
+    for idx, row in enumerate(rows[1:], start=2):  # Skip header, start at row 2
+        url = row[URL_COL - 1]
+        status = row[STATUS_COL - 1] if len(row) >= STATUS_COL else ''
+
+        if status.strip().lower() == 'done' or not url.strip():
             continue
 
-        email_cell = worksheet.cell(i, EMAIL_COL).value
-        status_cell = worksheet.cell(i, STATUS_COL).value
-        if email_cell or status_cell == "Done":
-            continue  # Already processed
+        if not is_valid_domain(url):
+            sheet.update_cell(idx, STATUS_COL, 'Invalid URL')
+            continue
 
-        print(f"[{i}] Scraping: {referring_url}")
-        res = requests.get(referring_url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(res.text, "html.parser")
-        text = soup.get_text(separator=" ", strip=True)
+        print(f"Processing row {idx}: {url}")
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            html = response.text
 
-        emails, phones = extract_emails_and_phones(text)
-        email_str = ", ".join(emails)
-        phone_str = ", ".join(phones)
+            emails, phones = extract_contacts(html)
 
-        worksheet.update_cell(i, EMAIL_COL, email_str)
-        worksheet.update_cell(i, PHONE_COL, phone_str)
-        worksheet.update_cell(i, STATUS_COL, "Done")
-        print(f"[{i}] ✅ Success: {email_str} | {phone_str}")
-        time.sleep(10)
+            email_str = ', '.join(emails) if emails else ''
+            phone_str = ', '.join(phones) if phones else ''
 
-    except Exception as e:
-        print(f"[{i}] ❌ Error: {str(e)}")
-        worksheet.update_cell(i, STATUS_COL, "Error")
-        time.sleep(5)
+            sheet.update_cell(idx, EMAIL_COL, email_str)
+            sheet.update_cell(idx, PHONE_COL, phone_str)
+            sheet.update_cell(idx, STATUS_COL, 'Done')
+
+        except Exception as e:
+            print(f"Error on row {idx}: {e}")
+            sheet.update_cell(idx, STATUS_COL, f"Error: {str(e)}")
+
+        time.sleep(5)  # Be polite
+
+if __name__ == '__main__':
+    main()
